@@ -1,12 +1,11 @@
 //
-//  OpenType.cpp
-//  OpengGLTest
+//  OpenType.c
 //
 //  Created by 鍋島雅貴 on 2016/05/21.
 //  Copyright © 2016年 鍋島雅貴. All rights reserved.
 //
 
-#include "OpenType.hpp"
+#include "OpenType.h"
 #include <string.h>
 
 #define OTF_TRAP(r) if(OTF_FAILED(err = (r))) { goto error_exit; }
@@ -74,12 +73,12 @@ otf_result_t otf_read_u32b(otf_source_t *self, uint32_t *data)
     return OTF_S_OK;
 }
 
-otf_result_t inline otf_read_fixed(otf_source_t *self, otf_fixed_t *data)
+otf_result_t otf_read_fixed(otf_source_t *self, otf_fixed_t *data)
 {
     return otf_read_u32b(self, (uint32_t *)data);
 }
 
-otf_result_t inline otf_read_datetime(otf_source_t *self, otf_datetime_t *data)
+otf_result_t otf_read_datetime(otf_source_t *self, otf_datetime_t *data)
 {
     return otf_read(self, data, sizeof(otf_datetime_t));
 }

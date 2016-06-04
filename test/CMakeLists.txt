@@ -21,7 +21,7 @@ add_subdirectory(${googletest_SOURCE_DIR} ${googletest_BINARY_DIR} EXCLUDE_FROM_
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
-set(test_SRCS test_OpenType.cpp)
+set(test_SRCS byte_array.c test_byte_array.cpp test_OpenType.cpp)
 add_executable(runUnitTests gtest.cpp ${test_SRCS})
 target_link_libraries(runUnitTests gtest gmock libotfont)
 
