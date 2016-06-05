@@ -188,9 +188,9 @@ typedef struct {
     uint16_t instructions_length;
     uint8_t *instructions;
     uint8_t *flags;
-    int32_t *x_coordinates;
+    int16_t *x_coordinates;
     /* abs */
-    int32_t *y_coordinates; /* abs */
+    int16_t *y_coordinates; /* abs */
 } otf_simple_glyph_desc_t;
 
 typedef struct {
@@ -209,49 +209,43 @@ typedef struct {
 } otf_glyf_table_t;
 
 typedef struct {
+    otf_glyf_table_t *ascii[128];
+} otf_glyph_cache_t;
+
+typedef struct {
     uint32_t flags;
     otf_source_t *src;
     otf_heap_t *heap;
     otf_offset_table_t offset_table;
-    otf_table_dir_entry_t *table_dir_enties;
+    otf_table_dir_entry_t *table_dir_entries;
     otf_head_table_t head_table;
     otf_cmap_table_t cmap_table;
     otf_maxp_table_t maxp_table;
     otf_loca_table_t loca_table;
+    uint32_t         glyf_table_offset;
 } otf_font_t;
 
 #define OTF_PATH_CLOSE_PATH     (0 << 1)
-#define OTF_PATH_MOVE_TO        (1 << 1)
-#define OTF_PATH_LINE_TO        (2 << 1)
-#define OTF_PATH_QUAD_TO        (5 << 1)
-
-typedef struct {
-    otf_heap_t *heap;
-    uint8_t *segments;
-    int16_t *data;
-    uint32_t segments_count;
-    uint32_t data_count;
-    uint32_t segments_capacity;
-    uint32_t data_capacity;
-} otf_path_t;
+#define OTF_PATH_MOVE_TO        (1 << 1)    /* p0:x, p1:y */
+#define OTF_PATH_LINE_TO        (2 << 1)    /* p0:x, p2:y */
+#define OTF_PATH_QUAD_TO        (5 << 1)    /* p0:ax, p1:ay, p2:x, p3:y */
 
 typedef otf_result_t (*otf_add_path_seg_cb_t)(void *user_data,
-                                              uint8_t seg, uint16_t p0, uint16_t p1, uint16_t p2, uint16_t p3);
+                                              uint8_t seg, int16_t p0, int16_t p1, int16_t p2, int16_t p3);
 
 otf_result_t otf_load_font(otf_heap_t *heap, otf_source_t *src, uint32_t flags, otf_font_t **font);
 void otf_free_font(otf_font_t *font);
-otf_result_t otf_get_glyph_outline(otf_font_t *font, uint32_t code, otf_path_t **outline);
-otf_result_t otf_get_text_outline_utf8(otf_font_t *font, const uint8_t *text, uint32_t text_length,
-                                       otf_path_t **outline);
-otf_result_t otf_get_glyph_metrics(otf_font_t *font, uint32_t code);
-otf_result_t otf_get_text_size_utf8(otf_font_t *font, const uint8_t *text, uint32_t text_length,
-                                    uint16_t *width, uint16_t *height);
-void otf_free_path(otf_path_t *path);
+
+otf_result_t otf_get_glyf_table(otf_font_t *self, uint32_t index, otf_glyf_table_t **table);
+void otf_free_glyf_table(otf_font_t *self, otf_glyf_table_t *table);
+otf_result_t otf_make_outline(otf_font_t *self, otf_glyf_table_t *table,
+                              otf_add_path_seg_cb_t add_path_seg_cb,
+                              void *user_data);
 
 #define OTF_FONT_FLAG_USE_CACHE         1
 #define OTF_FONT_FLAG_AUTO_CLOSE_SOURCE 2
 
-#define OTF_TAG(c0, c1, c2, c3) ((uint32_t)c0 << 24)
+#define OTF_TAG(c0, c1, c2, c3) (((uint32_t)c0 << 24) | ((uint32_t)c1 << 16)| ((uint32_t)c2 << 8)| ((uint32_t)c3 << 0))
 #define OTF_TAG_CMAP OTF_TAG('c', 'm', 'a', 'p')
 #define OTF_TAG_HEAD OTF_TAG('h', 'e', 'a', 'd')
 #define OTF_TAG_HHEA OTF_TAG('h', 'h', 'e', 'a')

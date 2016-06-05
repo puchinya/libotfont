@@ -10,6 +10,8 @@
 
 #define OTF_TRAP(r) if(OTF_FAILED(err = (r))) { goto error_exit; }
 
+void otf_finalize(otf_font_t *self);
+
 void *otf_malloc(otf_heap_t *self, size_t size)
 {
     return self->alloc(self, size);
@@ -133,13 +135,13 @@ void otf_cleanup(otf_font_t *self)
 
 otf_result_t otf_read_cmap_table(otf_source_t *src, otf_cmap_table_t *cmap)
 {
-    /* @TODO */
+    /* TODO: */
     return OTF_S_OK;
 }
 
 otf_result_t otf_validate_head_table(otf_head_table_t *table)
 {
-    if(table->magic_number != 0xB1B0AFBA) {
+    if(table->magic_number != 0x5F0F3CF5) {
         return OTF_E_FILE_FORMAT;
     }
     if(table->uints_per_em < 16 || table->uints_per_em > 16384) {
@@ -173,6 +175,8 @@ static otf_result_t otf_read_head_table(otf_source_t *src, otf_head_table_t *hea
     OTF_TRAP(otf_read_datetime(src, &head->modified));
     OTF_TRAP(otf_read_u16b(src, (uint16_t *)&head->x_min));
     OTF_TRAP(otf_read_u16b(src, (uint16_t *)&head->y_min));
+    OTF_TRAP(otf_read_u16b(src, (uint16_t *)&head->x_max));
+    OTF_TRAP(otf_read_u16b(src, (uint16_t *)&head->y_max));
     OTF_TRAP(otf_read_u16b(src, &head->mac_style));
     OTF_TRAP(otf_read_u16b(src, &head->lowest_rec_ppem));
     OTF_TRAP(otf_read_u16b(src, (uint16_t *)&head->font_direction_hint));
@@ -190,8 +194,10 @@ static otf_result_t otf_read_maxp_table(otf_source_t *src, otf_maxp_table_t *max
     otf_result_t err;
 
     OTF_TRAP(otf_read_fixed(src, &maxp->version));
-    OTF_TRAP(otf_read_u16b_n(src, &maxp->num_glyphs, maxp->version < 0x10000 ? 1 : 14));
-
+    OTF_TRAP(otf_read_u16b(src, &maxp->num_glyphs));
+    if(maxp->version >= 0x10000) {
+        OTF_TRAP(otf_read_u16b_n(src, &maxp->max_points, 13));
+    }
     return OTF_S_OK;
 
 error_exit:
@@ -218,7 +224,7 @@ static otf_result_t otf_read_loca_table(otf_font_t *self, otf_loca_table_t *loca
         self->loca_table.u.long_offsets = long_offsets;
     } else {
         short_offsets = (uint16_t *)otf_malloc(self->heap, sizeof(uint16_t) * n);
-        if(long_offsets == NULL) {
+        if(short_offsets == NULL) {
             err = OTF_E_MEM;
             goto error_exit;
         }
@@ -245,20 +251,31 @@ otf_result_t otf_load_impl(otf_font_t *self, otf_heap_t *heap, otf_source_t *src
     otf_result_t err;
     uint32_t i;
     uint32_t read_flags;
+    otf_fixed_t sfnt_version;
 
+    self->heap = heap;
     self->src = src;
     self->flags = flags;
+
+    /* read version */
+    OTF_TRAP(otf_read_fixed(self->src, &sfnt_version));
 
     /* read offset table */
     OTF_TRAP(otf_read_u16b_n(self->src, (uint16_t *)&self->offset_table, 4));
 
     /* read table directory entries */
-    OTF_TRAP(otf_read_u32b_n(self->src, (uint32_t *)self->table_dir_enties, self->offset_table.num_tables * 4));
+    self->table_dir_entries = otf_malloc(heap, sizeof(otf_table_dir_entry_t) * self->offset_table.num_tables);
+    if(self->table_dir_entries == NULL) {
+        err = OTF_E_MEM;
+        goto error_exit;
+    }
+
+    OTF_TRAP(otf_read_u32b_n(self->src, (uint32_t *)self->table_dir_entries, self->offset_table.num_tables * 4));
 
     /* read required tables */
     read_flags = 0;
     for(i = 0; i < self->offset_table.num_tables; i++) {
-        otf_table_dir_entry_t *entry = &self->table_dir_enties[i];
+        otf_table_dir_entry_t *entry = &self->table_dir_entries[i];
         OTF_TRAP(otf_seek(self->src, entry->offset));
         switch (entry->tag) {
             case OTF_TAG_CMAP:
@@ -300,7 +317,7 @@ otf_result_t otf_load_impl(otf_font_t *self, otf_heap_t *heap, otf_source_t *src
     /* read outlines table */
     read_flags = 0;
     for(i = 0; i < self->offset_table.num_tables; i++) {
-        otf_table_dir_entry_t *entry = &self->table_dir_enties[i];
+        otf_table_dir_entry_t *entry = &self->table_dir_entries[i];
         OTF_TRAP(otf_seek(self->src, entry->offset));
         switch (entry->tag) {
             case OTF_TAG_LOCA:
@@ -311,6 +328,13 @@ otf_result_t otf_load_impl(otf_font_t *self, otf_heap_t *heap, otf_source_t *src
                 err = otf_read_loca_table(self, &self->loca_table);
                 read_flags |= OTF_READ_TAG_LOCA;
                 break;
+            case OTF_TAG_GLYF:
+                if(read_flags & OTF_READ_TAG_GLYF) {
+                    err = OTF_E_FILE_FORMAT;
+                    goto error_exit;
+                }
+                self->glyf_table_offset = entry->offset;
+                read_flags |= OTF_READ_TAG_GLYF;
             default:
                 continue;
         }
@@ -323,11 +347,59 @@ otf_result_t otf_load_impl(otf_font_t *self, otf_heap_t *heap, otf_source_t *src
     return OTF_S_OK;
 
 error_exit:
-    if(flags & OTF_FONT_FLAG_AUTO_CLOSE_SOURCE) {
+    otf_finalize(self);
+
+    return err;
+}
+
+
+otf_result_t otf_load_font(otf_heap_t *heap, otf_source_t *src, uint32_t flags, otf_font_t **font)
+{
+    otf_font_t *f;
+    otf_result_t r;
+
+    f = (otf_font_t *)otf_malloc(heap, sizeof(otf_font_t));
+    if(f == NULL) {
+        return OTF_E_MEM;
+    }
+
+    // zero clear
+    memset(f, 0, sizeof(otf_font_t));
+
+    r = otf_load_impl(f, heap, src, flags);
+    if(OTF_FAILED(r)) {
+        otf_free(heap, f);
+        return r;
+    }
+
+    *font = f;
+
+    return OTF_S_OK;
+
+}
+
+void otf_finalize(otf_font_t *self)
+{
+    otf_heap_t *heap = self->heap;
+    if(self->table_dir_entries != NULL) {
+        otf_free(heap, self->table_dir_entries);
+        self->table_dir_entries = NULL;
+    }
+    if(self->loca_table.u.long_offsets != NULL) {
+        otf_free(heap, self->loca_table.u.long_offsets);
+        self->loca_table.u.long_offsets = NULL;
+    }
+
+    if(self->src != NULL && (self->flags & OTF_FONT_FLAG_AUTO_CLOSE_SOURCE) != 0) {
         otf_close(self->src);
         self->src = NULL;
     }
-    return err;
+}
+
+void otf_free_font(otf_font_t *font)
+{
+    otf_finalize(font);
+    otf_free(font->heap, font);
 }
 
 #define TTF_COORDINATE_FLAG_ON_CURVE                    0x01
@@ -336,52 +408,6 @@ error_exit:
 #define TTF_COORDINATE_FLAG_REPEAT                      0x08
 #define TTF_COORDINATE_FLAG_X_IS_SAME_OR_POSITIVE       0x10
 #define TTF_COORDINATE_FLAG_Y_IS_SAME_OR_POSITIVE       0x20
-
-
-otf_result_t otf_create_path(otf_heap_t *heap, otf_path_t **path)
-{
-    otf_path_t *p;
-
-    p = (otf_path_t *)otf_malloc(heap, sizeof(otf_path_t));
-    if(p == NULL) {
-        return OTF_E_MEM;
-    }
-    memset(p, 0, sizeof(otf_path_t));
-    p->heap = heap;
-
-    *path = p;
-
-    return OTF_S_OK;
-}
-
-otf_result_t otf_path_move_to(otf_path_t *self, int32_t x, int32_t y)
-{
-    self->segments[self->segments_count++] = OTF_PATH_MOVE_TO;
-    self->data[self->data_count++] = x;
-    self->data[self->data_count++] = y;
-
-    return OTF_S_OK;
-}
-
-otf_result_t otf_path_line_to(otf_path_t *self, int32_t x, int32_t y)
-{
-    self->segments[self->segments_count++] = OTF_PATH_LINE_TO;
-    self->data[self->data_count++] = x;
-    self->data[self->data_count++] = y;
-
-    return OTF_S_OK;
-}
-
-otf_result_t otf_path_quad_to(otf_path_t *self, int32_t x, int32_t y, int32_t ax, int32_t ay)
-{
-    self->segments[self->segments_count++] = OTF_PATH_QUAD_TO;
-    self->data[self->data_count++] = x;
-    self->data[self->data_count++] = y;
-    self->data[self->data_count++] = ax;
-    self->data[self->data_count++] = ay;
-
-    return OTF_S_OK;
-}
 
 otf_result_t otf_read_glyph_header(otf_source_t *src, otf_glyph_header_t *header)
 {
@@ -420,8 +446,8 @@ otf_result_t otf_read_simpl_glyph_desc(otf_heap_t *heap, otf_source_t *src, otf_
     uint16_t instructions_length;
     uint8_t *instructions = NULL;
     uint8_t *flags = NULL;
-    int32_t *x_coordinates = NULL;
-    int32_t *y_coordinates = NULL;
+    int16_t *x_coordinates = NULL;
+    int16_t *y_coordinates = NULL;
     uint32_t i;
     uint32_t flags_length;
 
@@ -452,14 +478,14 @@ otf_result_t otf_read_simpl_glyph_desc(otf_heap_t *heap, otf_source_t *src, otf_
 
     OTF_TRAP(otf_read(src, flags, flags_length));
 
-    x_coordinates = (int32_t *)otf_malloc(heap, sizeof(int32_t) * flags_length);
+    x_coordinates = (int16_t *)otf_malloc(heap, sizeof(int16_t) * flags_length);
     if(x_coordinates == NULL) {
         err = OTF_E_MEM;
         goto error_exit;
     }
 
-    y_coordinates = (int32_t *)otf_malloc(heap, sizeof(int32_t) * flags_length);
-    if(x_coordinates == NULL) {
+    y_coordinates = (int16_t *)otf_malloc(heap, sizeof(int16_t) * flags_length);
+    if(y_coordinates == NULL) {
         err = OTF_E_MEM;
         goto error_exit;
     }
@@ -468,24 +494,24 @@ otf_result_t otf_read_simpl_glyph_desc(otf_heap_t *heap, otf_source_t *src, otf_
     {
         int32_t prev_x;
         for(i = 0; i < flags_length; i++) {
-            uint8_t flag;
+            uint8_t flag = flags[i];
             int16_t dx;
-            if(flag & TTF_COORDINATE_FLAG_X_SHORT_VECTOR) {
+            if((flag & TTF_COORDINATE_FLAG_X_SHORT_VECTOR) != 0) {
                 uint8_t data;
                 OTF_TRAP(otf_read_u8(src, &data));
                 dx = data;
-                if(!(flag & TTF_COORDINATE_FLAG_X_IS_SAME_OR_POSITIVE)) {
+                if((flag & TTF_COORDINATE_FLAG_X_IS_SAME_OR_POSITIVE) == 0) {
                     dx = -dx;
                 }
             } else {
-                if(flag & TTF_COORDINATE_FLAG_X_IS_SAME_OR_POSITIVE) {
+                if((flag & TTF_COORDINATE_FLAG_X_IS_SAME_OR_POSITIVE) != 0) {
                     dx = 0;
                 } else {
                     OTF_TRAP(otf_read_u16b(src, (uint16_t *)&dx));
                 }
             }
             prev_x += dx;
-            x_coordinates[i] = prev_x;
+            x_coordinates[i] = (int16_t)prev_x;
         }
     }
 
@@ -493,24 +519,24 @@ otf_result_t otf_read_simpl_glyph_desc(otf_heap_t *heap, otf_source_t *src, otf_
     {
         int32_t prev_y = 0;
         for(i = 0; i < flags_length; i++) {
-            uint8_t flag;
+            uint8_t flag = flags[i];
             int16_t dy;
-            if(flag & TTF_COORDINATE_FLAG_Y_SHORT_VECTOR) {
+            if((flag & TTF_COORDINATE_FLAG_Y_SHORT_VECTOR) != 0) {
                 uint8_t data;
                 OTF_TRAP(otf_read_u8(src, &data));
                 dy = data;
-                if(!(flag & TTF_COORDINATE_FLAG_Y_IS_SAME_OR_POSITIVE)) {
+                if((flag & TTF_COORDINATE_FLAG_Y_IS_SAME_OR_POSITIVE) == 0) {
                     dy = -dy;
                 }
             } else {
-                if(flag & TTF_COORDINATE_FLAG_Y_IS_SAME_OR_POSITIVE) {
+                if((flag & TTF_COORDINATE_FLAG_Y_IS_SAME_OR_POSITIVE) != 0) {
                     dy = 0;
                 } else {
                     OTF_TRAP(otf_read_u16b(src, (uint16_t *)&dy));
                 }
             }
             prev_y += dy;
-            y_coordinates[i] = prev_y;
+            y_coordinates[i] = (int16_t)prev_y;
         }
     }
 
@@ -569,7 +595,7 @@ void otf_free_glyf_table(otf_font_t *self, otf_glyf_table_t *table)
 uint32_t otf_get_glyf_table_offset(otf_font_t *self, uint32_t index)
 {
     if(self->head_table.index_to_loc_format == OTF_INDEX_TO_LOC_FORMAT_SHORT) {
-        return self->loca_table.u.short_offsets[index];
+        return self->loca_table.u.short_offsets[index] * 2;
     } else {
         return self->loca_table.u.long_offsets[index];
     }
@@ -583,9 +609,8 @@ otf_result_t otf_get_glyf_table(otf_font_t *self, uint32_t index, otf_glyf_table
     uint32_t glyf_table_offset;
     otf_glyf_table_t *glyf_table = NULL;
 
-    glyf_table_offset = otf_get_glyf_table_offset(self, index);
+    glyf_table_offset = self->glyf_table_offset + otf_get_glyf_table_offset(self, index);
     src = self->src;
-
 
     glyf_table = (otf_glyf_table_t *)otf_malloc(self->heap, sizeof(otf_glyf_table_t));
     if(glyf_table == NULL) {
@@ -625,8 +650,8 @@ otf_result_t otf_make_outline(otf_font_t *self, otf_glyf_table_t *table,
 
         uint32_t i, index, start_index, end_index;
         uint8_t *flags = table->u.simple.flags;
-        int32_t *x_coordinates = table->u.simple.x_coordinates;
-        int32_t *y_coordinates = table->u.simple.y_coordinates;
+        int16_t *x_coordinates = table->u.simple.x_coordinates;
+        int16_t *y_coordinates = table->u.simple.y_coordinates;
         uint16_t *end_pts_of_contours = table->u.simple.end_pts_of_contours;
 
         start_index = 0;
@@ -644,7 +669,7 @@ otf_result_t otf_make_outline(otf_font_t *self, otf_glyf_table_t *table,
             y = y_coordinates[start_index];
             flag = flags[start_index];
 
-            if(flag & TTF_COORDINATE_FLAG_ON_CURVE) {
+            if((flag & TTF_COORDINATE_FLAG_ON_CURVE) != 0) {
                 done_move = 1;
                 add_path_seg_cb(user_data, OTF_PATH_MOVE_TO, x, y, 0, 0);
             }
@@ -660,7 +685,7 @@ otf_result_t otf_make_outline(otf_font_t *self, otf_glyf_table_t *table,
                 flag = flags[index];
 
                 /* OFFカーブが連続したなら、ONカーブの中点を挿入する */
-                if(!(flag & TTF_COORDINATE_FLAG_ON_CURVE) && !(pflag & TTF_COORDINATE_FLAG_ON_CURVE)) {
+                if((flag & TTF_COORDINATE_FLAG_ON_CURVE) == 0 && (pflag & TTF_COORDINATE_FLAG_ON_CURVE) == 0) {
                     x = (x + px) / 2;
                     y = (y + py) / 2;
                     flag = TTF_COORDINATE_FLAG_ON_CURVE;
@@ -668,15 +693,17 @@ otf_result_t otf_make_outline(otf_font_t *self, otf_glyf_table_t *table,
                     index++;
                 }
 
-                if(flag & TTF_COORDINATE_FLAG_ON_CURVE) {
-                    if(pflag & TTF_COORDINATE_FLAG_ON_CURVE) {
+                if((flag & TTF_COORDINATE_FLAG_ON_CURVE) != 0) {
+                    if((pflag & TTF_COORDINATE_FLAG_ON_CURVE) != 0) {
+                        /* ON->ONなら、直線で結ぶ */
                         add_path_seg_cb(user_data, OTF_PATH_LINE_TO, x, y, 0, 0);
                     } else {
+                        /* OFF->ON */
                         if(!done_move) {
                             add_path_seg_cb(user_data, OTF_PATH_MOVE_TO, x, y, 0, 0);
                             done_move = 1;
                         } else {
-                            add_path_seg_cb(user_data, OTF_PATH_QUAD_TO, x, y, px, py);
+                            add_path_seg_cb(user_data, OTF_PATH_QUAD_TO, px, py, x, y);
                         }
                     }
                 }
@@ -694,7 +721,7 @@ otf_result_t otf_make_outline(otf_font_t *self, otf_glyf_table_t *table,
                 flag = flags[index];
 
                 /* OFFカーブが連続したなら、ONカーブの中点を挿入する */
-                if(!(flag & TTF_COORDINATE_FLAG_ON_CURVE) && !(pflag & TTF_COORDINATE_FLAG_ON_CURVE)) {
+                if((flag & TTF_COORDINATE_FLAG_ON_CURVE) == 0 && (pflag & TTF_COORDINATE_FLAG_ON_CURVE) == 0) {
                     x = (x + px) / 2;
                     y = (y + py) / 2;
                     flag = TTF_COORDINATE_FLAG_ON_CURVE;
@@ -702,17 +729,19 @@ otf_result_t otf_make_outline(otf_font_t *self, otf_glyf_table_t *table,
                     index++;
                 }
 
-                if(flag & TTF_COORDINATE_FLAG_ON_CURVE) {
-                    if(pflag & TTF_COORDINATE_FLAG_ON_CURVE) {
+                if((flag & TTF_COORDINATE_FLAG_ON_CURVE) != 0) {
+                    if((pflag & TTF_COORDINATE_FLAG_ON_CURVE) != 0) {
                         add_path_seg_cb(user_data, OTF_PATH_LINE_TO, x, y, 0, 0);
                     } else {
                         if(!done_move) {
                             add_path_seg_cb(user_data, OTF_PATH_MOVE_TO, x, y, 0, 0);
                             done_move = 1;
                         } else {
-                            add_path_seg_cb(user_data, OTF_PATH_QUAD_TO, x, y, px, py);
+                            add_path_seg_cb(user_data, OTF_PATH_QUAD_TO, px, py, x, y);
                         }
                     }
+                    /* 結べたら、終了 */
+                    break;
                 }
 
                 pflag = flag;
